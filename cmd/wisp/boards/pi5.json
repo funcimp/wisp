@@ -1,0 +1,28 @@
+{
+  "name": "pi5",
+  "arch": "aarch64",
+  "page_size": 16384,
+  "network_interface": "eth0",
+  "kernel": {
+    "source": "alpine",
+    "package": "linux-rpi",
+    "version": "6.6.31-r0",
+    "sha256": ""
+  },
+  "firmware": [
+    {
+      "url": "https://github.com/raspberrypi/firmware/raw/master/boot/start4.elf",
+      "dest": "start4.elf",
+      "sha256": ""
+    },
+    {
+      "url": "https://github.com/raspberrypi/firmware/raw/master/boot/fixup4.dat",
+      "dest": "fixup4.dat",
+      "sha256": ""
+    }
+  ],
+  "dtb": "bcm2712-rpi-5-b.dtb",
+  "boot_config": "arm_64bit=1\nkernel=Image\ninitramfs initrd.img followkernel\n",
+  "cmdline": "console=serial0,115200 console=tty1 rdinit=/init net.ifnames=0",
+  "modules": []
+}
