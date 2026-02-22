@@ -1,0 +1,31 @@
+{
+  "version": "0.2",
+  "words": [
+    "aarch64",
+    "chipset",
+    "chpst",
+    "cmdline",
+    "cpio",
+    "devtmpfs",
+    "dtb",
+    "dtbs",
+    "followkernel",
+    "genet",
+    "gokrazy",
+    "ifnames",
+    "initramfs",
+    "initrd",
+    "mkdosfs",
+    "procfs",
+    "rdinit",
+    "resolv",
+    "rootfs",
+    "sysfs",
+    "tmpfs",
+    "udhcpc",
+    "unikernels",
+    "virt",
+    "virtio",
+    "wpa"
+  ]
+}
