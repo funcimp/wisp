@@ -1,0 +1,27 @@
+{
+  "name": "qemu",
+  "arch": "aarch64",
+  "page_size": 4096,
+  "network_interface": "eth0",
+  "kernel": {
+    "source": "alpine",
+    "package": "linux-virt",
+    "version": "6.18.13-r0",
+    "sha256": ""
+  },
+  "cmdline": "rdinit=/init console=ttyAMA0 net.ifnames=0 quiet",
+  "modules": [
+    {
+      "path": "kernel/net/core/failover.ko.gz",
+      "name": "failover.ko"
+    },
+    {
+      "path": "kernel/drivers/net/net_failover.ko.gz",
+      "name": "net_failover.ko"
+    },
+    {
+      "path": "kernel/drivers/net/virtio_net.ko.gz",
+      "name": "virtio_net.ko"
+    }
+  ]
+}

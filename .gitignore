@@ -24,6 +24,12 @@ profile.cov
 go.work
 go.work.sum
 
+# Build artifacts (wisp Makefile output)
+build/
+
+# Embedded init binary (cross-compiled by Makefile, not committed)
+cmd/wisp/embed/init-arm64
+
 # env file
 .env
 
