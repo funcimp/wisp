@@ -76,7 +76,8 @@ jobs:
           name: init-binaries
           path: internal/initrd/embed/
 
+      - name: Install gosec
+        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.23.0
+
       - name: Run Gosec Security Scanner
-        uses: securego/gosec@v2.23.0
-        with:
-          args: -exclude-dir=testdata ./...
+        run: gosec ./...
