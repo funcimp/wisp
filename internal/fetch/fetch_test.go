@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/funcimp/wisp/internal/board"
@@ -46,8 +45,13 @@ func TestDownload(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dest := filepath.Join(t.TempDir(), "downloaded")
-			err := Download(srv.URL+"/kernel.apk", dest, tt.sha256)
+			root, err := os.OpenRoot(t.TempDir())
+			if err != nil {
+				t.Fatalf("open root: %v", err)
+			}
+			defer root.Close()
+
+			err = download(root, srv.URL+"/kernel.apk", "downloaded", tt.sha256)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -58,7 +62,7 @@ func TestDownload(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
-			got, err := os.ReadFile(dest)
+			got, err := root.ReadFile("downloaded")
 			if err != nil {
 				t.Fatalf("read downloaded file: %v", err)
 			}
@@ -81,10 +85,14 @@ func TestDownloadCached(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	dest := filepath.Join(t.TempDir(), "cached")
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatalf("open root: %v", err)
+	}
+	defer root.Close()
 
 	// First download.
-	if err := Download(srv.URL+"/file", dest, wantHash); err != nil {
+	if err := download(root, srv.URL+"/file", "cached", wantHash); err != nil {
 		t.Fatalf("first download: %v", err)
 	}
 	if calls != 1 {
@@ -92,7 +100,7 @@ func TestDownloadCached(t *testing.T) {
 	}
 
 	// Second download should use cache (checksum matches).
-	if err := Download(srv.URL+"/file", dest, wantHash); err != nil {
+	if err := download(root, srv.URL+"/file", "cached", wantHash); err != nil {
 		t.Fatalf("second download: %v", err)
 	}
 	if calls != 1 {
@@ -103,11 +111,11 @@ func TestDownloadCached(t *testing.T) {
 func TestExtractAPK(t *testing.T) {
 	// Build a tar.gz in memory with a few test files.
 	tmpDir := t.TempDir()
-	apkPath := filepath.Join(tmpDir, "test.apk")
+	apkPath := tmpDir + "/test.apk"
 
 	files := map[string]string{
-		"boot/vmlinuz-virt":                                            "kernel-image-data",
-		"lib/modules/6.18.13-0-virt/kernel/net/core/failover.ko.gz":   "failover-module",
+		"boot/vmlinuz-virt":                                              "kernel-image-data",
+		"lib/modules/6.18.13-0-virt/kernel/net/core/failover.ko.gz":     "failover-module",
 		"lib/modules/6.18.13-0-virt/kernel/drivers/net/virtio_net.ko.gz": "virtio-module",
 		".PKGINFO": "pkgname=linux-virt",
 	}
@@ -116,21 +124,24 @@ func TestExtractAPK(t *testing.T) {
 		t.Fatalf("create test APK: %v", err)
 	}
 
-	// Extract specific files.
-	kernelDest := filepath.Join(tmpDir, "vmlinuz")
-	failoverDest := filepath.Join(tmpDir, "failover.ko.gz")
+	root, err := os.OpenRoot(tmpDir)
+	if err != nil {
+		t.Fatalf("open root: %v", err)
+	}
+	defer root.Close()
 
+	// Extract specific files.
 	paths := map[string]string{
-		"boot/vmlinuz-virt": kernelDest,
-		"lib/modules/6.18.13-0-virt/kernel/net/core/failover.ko.gz": failoverDest,
+		"boot/vmlinuz-virt": "vmlinuz",
+		"lib/modules/6.18.13-0-virt/kernel/net/core/failover.ko.gz": "failover.ko.gz",
 	}
 
-	if err := ExtractAPK(apkPath, paths); err != nil {
+	if err := extractAPK(root, "test.apk", paths); err != nil {
 		t.Fatalf("extract: %v", err)
 	}
 
 	// Verify extracted files.
-	got, err := os.ReadFile(kernelDest)
+	got, err := root.ReadFile("vmlinuz")
 	if err != nil {
 		t.Fatalf("read kernel: %v", err)
 	}
@@ -138,7 +149,7 @@ func TestExtractAPK(t *testing.T) {
 		t.Fatalf("kernel content: got %q, want %q", got, "kernel-image-data")
 	}
 
-	got, err = os.ReadFile(failoverDest)
+	got, err = root.ReadFile("failover.ko.gz")
 	if err != nil {
 		t.Fatalf("read module: %v", err)
 	}
@@ -149,7 +160,7 @@ func TestExtractAPK(t *testing.T) {
 
 func TestExtractAPKMissingFile(t *testing.T) {
 	tmpDir := t.TempDir()
-	apkPath := filepath.Join(tmpDir, "test.apk")
+	apkPath := tmpDir + "/test.apk"
 
 	files := map[string]string{
 		"boot/vmlinuz-virt": "kernel",
@@ -158,12 +169,18 @@ func TestExtractAPKMissingFile(t *testing.T) {
 		t.Fatalf("create test APK: %v", err)
 	}
 
+	root, err := os.OpenRoot(tmpDir)
+	if err != nil {
+		t.Fatalf("open root: %v", err)
+	}
+	defer root.Close()
+
 	paths := map[string]string{
-		"boot/vmlinuz-virt": filepath.Join(tmpDir, "vmlinuz"),
-		"missing/file":      filepath.Join(tmpDir, "missing"),
+		"boot/vmlinuz-virt": "vmlinuz",
+		"missing/file":      "missing",
 	}
 
-	err := ExtractAPK(apkPath, paths)
+	err = extractAPK(root, "test.apk", paths)
 	if err == nil {
 		t.Fatal("expected error for missing file")
 	}

@@ -21,7 +21,6 @@
     "initrd",
     "GOARCH",
     "mkdosfs",
-    "mkinitrd",
     "testdata",
     "newc",
     "procfs",

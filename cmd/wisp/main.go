@@ -10,14 +10,12 @@
 package main
 
 import (
-	"bytes"
 	"debug/elf"
-	"embed"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -27,12 +25,6 @@ import (
 	"github.com/funcimp/wisp/internal/initrd"
 	"github.com/funcimp/wisp/internal/validate"
 )
-
-//go:embed embed/init-arm64
-var initBinary []byte
-
-//go:embed boards
-var boardsFS embed.FS
 
 func main() {
 	if len(os.Args) < 2 {
@@ -59,7 +51,7 @@ func main() {
 			os.Exit(1)
 		}
 	default:
-		fmt.Fprintf(os.Stderr, "wisp: unknown command %q\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "wisp: unknown command %q\n", os.Args[1]) //#nosec G705 -- CLI stderr output, %q escapes special characters
 		usage()
 		os.Exit(1)
 	}
@@ -109,7 +101,7 @@ func parseFlags(args []string) (*config, error) {
 
 	// If config file specified, load it.
 	if configFile != "" {
-		data, err := os.ReadFile(configFile)
+		data, err := os.ReadFile(configFile) //#nosec G304 -- user-provided config file path
 		if err != nil {
 			return nil, fmt.Errorf("read config file: %w", err)
 		}
@@ -138,20 +130,15 @@ func parseFlags(args []string) (*config, error) {
 	return &cfg, nil
 }
 
-// loadBoard loads a board profile from the embedded filesystem.
-func loadBoard(name string) (*board.Board, error) {
-	data, err := boardsFS.ReadFile("boards/" + name + ".json")
-	if err != nil {
-		return nil, fmt.Errorf("unknown target %q", name)
-	}
-	return board.Parse(data)
-}
-
 // archToELF maps board architecture strings to ELF machine types.
 func archToELF(arch string) elf.Machine {
 	switch arch {
 	case "aarch64":
 		return elf.EM_AARCH64
+	case "riscv64":
+		return elf.EM_RISCV
+	case "x86_64":
+		return elf.EM_X86_64
 	default:
 		return elf.EM_NONE
 	}
@@ -163,7 +150,7 @@ func cmdBuild(args []string) error {
 		return err
 	}
 
-	b, err := loadBoard(cfg.Target)
+	b, err := board.Get(cfg.Target)
 	if err != nil {
 		return err
 	}
@@ -173,13 +160,13 @@ func cmdBuild(args []string) error {
 
 func build(cfg *config, b *board.Board) error {
 	// Step 1: Validate binary.
-	fmt.Fprintf(os.Stderr, "validating binary %s\n", cfg.Binary)
+	fmt.Fprintf(os.Stderr, "validating binary %s\n", cfg.Binary) //#nosec G705 -- CLI stderr output
 	if err := validate.Binary(cfg.Binary, archToELF(b.Arch), b.PageSize); err != nil {
 		return fmt.Errorf("validate binary: %w", err)
 	}
 
 	// Step 2: Fetch kernel and modules.
-	fmt.Fprintf(os.Stderr, "fetching kernel (%s %s)\n", b.Kernel.Package, b.Kernel.Version)
+	fmt.Fprintf(os.Stderr, "fetching kernel (%s %s)\n", b.Kernel.Package, b.Kernel.Version) //#nosec G705 -- CLI stderr output
 	kr, err := fetch.Kernel(b)
 	if err != nil {
 		return fmt.Errorf("fetch kernel: %w", err)
@@ -197,107 +184,95 @@ func build(cfg *config, b *board.Board) error {
 
 	// Step 4: Build initrd.
 	fmt.Fprintf(os.Stderr, "building initrd\n")
-	initrdData, err := buildInitrd(cfg, b, kr)
+	net := initrd.NetworkConfig{
+		Interface: b.NetworkInterface,
+		Address:   cfg.IP,
+		Gateway:   cfg.Gateway,
+		DNS:       cfg.DNS,
+	}
+	var modules []initrd.KernelModule
+	for _, mp := range kr.ModulePaths {
+		modules = append(modules, initrd.KernelModule{HostPath: mp})
+	}
+	initrdData, err := initrd.Build(b.Arch, cfg.Binary, net, modules)
 	if err != nil {
 		return fmt.Errorf("build initrd: %w", err)
 	}
 
-	// Step 5: Create output.
-	if err := os.MkdirAll(cfg.Output, 0755); err != nil {
+	// Step 5: Create output directory scoped to the working directory.
+	wd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("working directory: %w", err)
+	}
+	wdRoot, err := os.OpenRoot(wd)
+	if err != nil {
+		return fmt.Errorf("open working directory: %w", err)
+	}
+	defer wdRoot.Close()
+
+	if err := wdRoot.MkdirAll(cfg.Output, 0750); err != nil {
 		return fmt.Errorf("create output dir: %w", err)
 	}
+	outRoot, err := wdRoot.OpenRoot(cfg.Output)
+	if err != nil {
+		return fmt.Errorf("open output dir: %w", err)
+	}
+	defer outRoot.Close()
 
 	if b.IsQEMU() {
-		return outputQEMU(cfg, kr, initrdData)
+		return outputQEMU(outRoot, cfg.Output, kr, initrdData)
 	}
-	return outputImage(cfg, b, kr, fwPaths, initrdData)
+	return outputImage(outRoot, cfg.Output, b, kr, fwPaths, initrdData)
 }
 
-// buildInitrd assembles the initrd cpio archive.
-func buildInitrd(cfg *config, b *board.Board, kr *fetch.KernelResult) ([]byte, error) {
-	var entries []initrd.Entry
-
-	// Mount-point directories.
-	for _, dir := range []string{"dev", "proc", "sys"} {
-		entries = append(entries, initrd.Entry{Path: dir, Mode: os.ModeDir | 0755})
-	}
-
-	// Init binary (embedded in wisp).
-	entries = append(entries, initrd.Entry{Path: "init", Data: initBinary, Mode: 0755})
-
-	// Service binary.
-	serviceData, err := os.ReadFile(cfg.Binary)
+// readCacheFile reads a file from the wisp cache directory, using os.Root
+// to scope access and prevent directory traversal.
+func readCacheFile(absPath string) ([]byte, error) {
+	cacheDir, err := fetch.CacheDir()
 	if err != nil {
-		return nil, fmt.Errorf("read binary: %w", err)
-	}
-	entries = append(entries, initrd.Entry{Path: "service/run", Data: serviceData, Mode: 0755})
-
-	// Network config.
-	iface := b.NetworkInterface
-	wispConf := fmt.Sprintf("IFACE=%s\nADDR=%s\nGW=%s\n", iface, cfg.IP, cfg.Gateway)
-	entries = append(entries, initrd.Entry{Path: "etc/wisp.conf", Data: []byte(wispConf), Mode: 0644})
-
-	// DNS config.
-	resolvConf := fmt.Sprintf("nameserver %s\n", cfg.DNS)
-	entries = append(entries, initrd.Entry{Path: "etc/resolv.conf", Data: []byte(resolvConf), Mode: 0644})
-
-	// Module list and module files.
-	if len(kr.ModulePaths) > 0 {
-		var moduleNames []string
-		for _, mp := range kr.ModulePaths {
-			name := filepath.Base(mp)
-			moduleNames = append(moduleNames, name)
-
-			data, err := os.ReadFile(mp)
-			if err != nil {
-				return nil, fmt.Errorf("read module %s: %w", name, err)
-			}
-			entries = append(entries, initrd.Entry{
-				Path: "lib/modules/" + name,
-				Data: data,
-				Mode: 0644,
-			})
-		}
-		modulesList := strings.Join(moduleNames, "\n") + "\n"
-		entries = append(entries, initrd.Entry{Path: "etc/modules", Data: []byte(modulesList), Mode: 0644})
-	}
-
-	// Write to buffer.
-	var buf bytes.Buffer
-	if err := initrd.Write(&buf, entries); err != nil {
 		return nil, err
 	}
-	return buf.Bytes(), nil
+	root, err := os.OpenRoot(cacheDir)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+
+	rel, err := filepath.Rel(cacheDir, absPath)
+	if err != nil {
+		return nil, fmt.Errorf("path not under cache: %w", err)
+	}
+	f, err := root.Open(rel)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
 }
 
 // outputQEMU writes kernel and initrd to the output directory.
-func outputQEMU(cfg *config, kr *fetch.KernelResult, initrdData []byte) error {
-	// Copy kernel.
-	kernelData, err := os.ReadFile(kr.KernelPath)
+func outputQEMU(root *os.Root, outDir string, kr *fetch.KernelResult, initrdData []byte) error {
+	kernelData, err := readCacheFile(kr.KernelPath)
 	if err != nil {
 		return fmt.Errorf("read kernel: %w", err)
 	}
-	kernelPath := filepath.Join(cfg.Output, "vmlinuz")
-	if err := os.WriteFile(kernelPath, kernelData, 0644); err != nil {
+	if err := root.WriteFile("vmlinuz", kernelData, 0600); err != nil {
+		return err
+	}
+	if err := root.WriteFile("initrd.img", initrdData, 0600); err != nil {
 		return err
 	}
 
-	// Write initrd.
-	initrdPath := filepath.Join(cfg.Output, "initrd.img")
-	if err := os.WriteFile(initrdPath, initrdData, 0644); err != nil {
-		return err
-	}
-
-	fmt.Fprintf(os.Stderr, "output: %s/vmlinuz, %s/initrd.img\n", cfg.Output, cfg.Output)
+	fmt.Fprintf(os.Stderr, "output: %s/vmlinuz, %s/initrd.img\n", outDir, outDir) //#nosec G705 -- CLI stderr output
 	return nil
 }
 
 // outputImage builds a FAT32 disk image for hardware targets.
-func outputImage(cfg *config, b *board.Board, kr *fetch.KernelResult, fwPaths map[string]string, initrdData []byte) error {
+func outputImage(root *os.Root, outDir string, b *board.Board, kr *fetch.KernelResult, fwPaths map[string]string, initrdData []byte) error {
 	var files []image.File
 
 	// Kernel image.
-	kernelData, err := os.ReadFile(kr.KernelPath)
+	kernelData, err := readCacheFile(kr.KernelPath)
 	if err != nil {
 		return fmt.Errorf("read kernel: %w", err)
 	}
@@ -308,7 +283,7 @@ func outputImage(cfg *config, b *board.Board, kr *fetch.KernelResult, fwPaths ma
 
 	// Firmware files.
 	for dest, localPath := range fwPaths {
-		data, err := os.ReadFile(localPath)
+		data, err := readCacheFile(localPath)
 		if err != nil {
 			return fmt.Errorf("read firmware %s: %w", dest, err)
 		}
@@ -329,12 +304,16 @@ func outputImage(cfg *config, b *board.Board, kr *fetch.KernelResult, fwPaths ma
 		files = append(files, image.File{Name: "cmdline.txt", Data: []byte(b.Cmdline + "\n")})
 	}
 
-	imgPath := filepath.Join(cfg.Output, b.Name+".img")
-	if err := image.Build(imgPath, files); err != nil {
+	imgName := b.Name + ".img"
+	imgData, err := image.Build(files)
+	if err != nil {
 		return fmt.Errorf("build image: %w", err)
 	}
+	if err := root.WriteFile(imgName, imgData, 0600); err != nil {
+		return fmt.Errorf("write image: %w", err)
+	}
 
-	fmt.Fprintf(os.Stderr, "output: %s\n", imgPath)
+	fmt.Fprintf(os.Stderr, "output: %s\n", filepath.Join(outDir, imgName)) //#nosec G705 -- CLI stderr output
 	return nil
 }
 
@@ -344,7 +323,7 @@ func cmdRun(args []string) error {
 		return err
 	}
 
-	b, err := loadBoard(cfg.Target)
+	b, err := board.Get(cfg.Target)
 	if err != nil {
 		return err
 	}
@@ -358,56 +337,56 @@ func cmdRun(args []string) error {
 		return err
 	}
 
-	// Launch QEMU.
+	// Print the QEMU command for the user to execute.
 	kernelPath := filepath.Join(cfg.Output, "vmlinuz")
 	initrdPath := filepath.Join(cfg.Output, "initrd.img")
-
 	port := "18080"
-	fmt.Fprintf(os.Stderr, "booting QEMU (port forward: localhost:%s -> guest:8080)\n", port)
-	fmt.Fprintf(os.Stderr, "test: curl http://localhost:%s/\n", port)
-	fmt.Fprintf(os.Stderr, "quit: Ctrl-A X\n")
-	fmt.Fprintf(os.Stderr, "---\n")
 
-	cmd := exec.Command("qemu-system-aarch64",
-		"-machine", "virt",
-		"-accel", "hvf",
-		"-cpu", "host",
-		"-m", "512M",
+	fmt.Println(qemuCommand(b, kernelPath, initrdPath, port))
+	return nil
+}
+
+// qemuCommand builds a copy-pasteable QEMU command line from a board's
+// QEMU configuration.
+func qemuCommand(b *board.Board, kernelPath, initrdPath, port string) string {
+	q := b.QEMU
+	args := []string{
+		q.Binary,
+		"-machine", q.Machine,
+		"-m", q.Memory,
 		"-kernel", kernelPath,
 		"-initrd", initrdPath,
-		"-append", b.Cmdline,
+		"-append", shellQuote(b.Cmdline),
 		"-nographic",
-		"-netdev", fmt.Sprintf("user,id=net0,hostfwd=tcp::%s-:8080", port),
-		"-device", "virtio-net-pci,netdev=net0",
-	)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	}
+	if q.CPU != "" {
+		args = append(args, "-cpu", q.CPU)
+	}
+	if q.Accel != "" {
+		args = append(args, "-accel", q.Accel)
+	}
+	if q.NetDev != "" {
+		args = append(args, "-netdev", fmt.Sprintf("user,id=net0,hostfwd=tcp::%s-:8080", port))
+		args = append(args, "-device", q.NetDev+",netdev=net0")
+	}
+	args = append(args, q.Extra...)
+	return strings.Join(args, " \\\n  ")
+}
 
-	return cmd.Run()
+// shellQuote wraps s in single quotes for safe shell use.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 func cmdTargets() {
-	entries, err := boardsFS.ReadDir("boards")
+	boards, err := board.List()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "wisp targets: %v\n", err)
 		os.Exit(1)
 	}
 
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		name := strings.TrimSuffix(e.Name(), ".json")
-		data, err := boardsFS.ReadFile("boards/" + e.Name())
-		if err != nil {
-			continue
-		}
-		b, err := board.Parse(data)
-		if err != nil {
-			continue
-		}
-		label := name
+	for _, b := range boards {
+		label := b.Name
 		if b.IsQEMU() {
 			label += " (QEMU)"
 		}
@@ -435,7 +414,7 @@ func cmdValidate(args []string) error {
 		return fmt.Errorf("--binary is required")
 	}
 
-	b, err := loadBoard(target)
+	b, err := board.Get(target)
 	if err != nil {
 		return err
 	}

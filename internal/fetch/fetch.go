@@ -1,6 +1,9 @@
 // Package fetch downloads and caches board assets (kernel packages, firmware)
 // with optional SHA256 verification. Assets are cached in ~/.cache/wisp/ and
 // reused across builds when the version and checksum match.
+//
+// All file operations within the cache directory use os.Root to scope access
+// and prevent directory traversal.
 package fetch
 
 import (
@@ -28,22 +31,39 @@ func CacheDir() (string, error) {
 	return filepath.Join(home, ".cache", "wisp"), nil
 }
 
-// Download fetches a URL to destPath. If wantSHA256 is non-empty, the download
-// is verified against the expected checksum. If destPath already exists with the
-// correct checksum, the download is skipped.
-func Download(url, destPath, wantSHA256 string) error {
+// openCacheRoot creates the cache directory if needed and returns an os.Root
+// scoped to it, along with the absolute path for constructing return values.
+func openCacheRoot() (*os.Root, string, error) {
+	cacheDir, err := CacheDir()
+	if err != nil {
+		return nil, "", err
+	}
+	if err := os.MkdirAll(cacheDir, 0750); err != nil {
+		return nil, "", fmt.Errorf("create cache dir: %w", err)
+	}
+	root, err := os.OpenRoot(cacheDir)
+	if err != nil {
+		return nil, "", fmt.Errorf("open cache root: %w", err)
+	}
+	return root, cacheDir, nil
+}
+
+// download fetches a URL to relPath within root. If wantSHA256 is non-empty,
+// the download is verified against the expected checksum. If the file already
+// exists with the correct checksum, the download is skipped.
+func download(root *os.Root, url, relPath, wantSHA256 string) error {
 	// Check if cached file already matches.
 	if wantSHA256 != "" {
-		if ok, _ := checksum(destPath, wantSHA256); ok {
+		if ok, _ := checksumFile(root, relPath, wantSHA256); ok {
 			return nil
 		}
 	}
 
-	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+	if err := root.MkdirAll(filepath.Dir(relPath), 0750); err != nil {
 		return fmt.Errorf("create dir: %w", err)
 	}
 
-	resp, err := http.Get(url)
+	resp, err := http.Get(url) //#nosec G107 -- URLs come from embedded board profiles, not user input
 	if err != nil {
 		return fmt.Errorf("download %s: %w", url, err)
 	}
@@ -53,7 +73,7 @@ func Download(url, destPath, wantSHA256 string) error {
 		return fmt.Errorf("download %s: HTTP %d", url, resp.StatusCode)
 	}
 
-	f, err := os.Create(destPath)
+	f, err := root.Create(relPath)
 	if err != nil {
 		return err
 	}
@@ -62,20 +82,20 @@ func Download(url, destPath, wantSHA256 string) error {
 	w := io.MultiWriter(f, h)
 
 	if _, err := io.Copy(w, resp.Body); err != nil {
-		f.Close()
-		os.Remove(destPath)
+		_ = f.Close()
+		_ = root.Remove(relPath)
 		return fmt.Errorf("download %s: %w", url, err)
 	}
 
 	if err := f.Close(); err != nil {
-		os.Remove(destPath)
+		_ = root.Remove(relPath)
 		return err
 	}
 
 	if wantSHA256 != "" {
 		got := hex.EncodeToString(h.Sum(nil))
 		if got != wantSHA256 {
-			os.Remove(destPath)
+			_ = root.Remove(relPath)
 			return fmt.Errorf("checksum mismatch for %s: got %s, want %s", url, got, wantSHA256)
 		}
 	}
@@ -83,12 +103,11 @@ func Download(url, destPath, wantSHA256 string) error {
 	return nil
 }
 
-// ExtractAPK extracts specific files from an Alpine APK package (tar.gz).
-// The paths map keys are tar entry paths to match (e.g.,
-// "lib/modules/6.18.13-0-virt/kernel/net/core/failover.ko.gz") and values are
-// destination file paths. Matched files are written to their destinations.
-func ExtractAPK(apkPath string, paths map[string]string) error {
-	f, err := os.Open(apkPath)
+// extractAPK extracts specific files from an Alpine APK package (tar.gz).
+// apkRelPath is the APK location relative to root. The paths map keys are tar
+// entry paths to match and values are destination paths relative to root.
+func extractAPK(root *os.Root, apkRelPath string, paths map[string]string) error {
+	f, err := root.Open(apkRelPath)
 	if err != nil {
 		return fmt.Errorf("open apk: %w", err)
 	}
@@ -117,17 +136,17 @@ func ExtractAPK(apkPath string, paths map[string]string) error {
 			continue
 		}
 
-		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+		if err := root.MkdirAll(filepath.Dir(dest), 0750); err != nil {
 			return fmt.Errorf("create dir for %s: %w", dest, err)
 		}
 
-		out, err := os.Create(dest)
+		out, err := root.Create(dest)
 		if err != nil {
 			return fmt.Errorf("create %s: %w", dest, err)
 		}
 
-		if _, err := io.Copy(out, tr); err != nil {
-			out.Close()
+		if _, err := io.Copy(out, tr); err != nil { //#nosec G110 -- decompressing SHA256-verified Alpine packages
+			_ = out.Close()
 			return fmt.Errorf("extract %s: %w", hdr.Name, err)
 		}
 
@@ -144,7 +163,7 @@ func ExtractAPK(apkPath string, paths map[string]string) error {
 	if found != len(paths) {
 		var missing []string
 		for p, dest := range paths {
-			if _, err := os.Stat(dest); err != nil {
+			if _, err := root.Stat(dest); err != nil {
 				missing = append(missing, p)
 			}
 		}
@@ -154,9 +173,9 @@ func ExtractAPK(apkPath string, paths map[string]string) error {
 	return nil
 }
 
-// DecompressGzip decompresses a gzip file to dest.
-func DecompressGzip(src, dest string) error {
-	f, err := os.Open(src)
+// decompressGzip decompresses a gzip file within root.
+func decompressGzip(root *os.Root, srcRel, destRel string) error {
+	f, err := root.Open(srcRel)
 	if err != nil {
 		return err
 	}
@@ -168,13 +187,13 @@ func DecompressGzip(src, dest string) error {
 	}
 	defer gz.Close()
 
-	out, err := os.Create(dest)
+	out, err := root.Create(destRel)
 	if err != nil {
 		return err
 	}
 
-	if _, err := io.Copy(out, gz); err != nil {
-		out.Close()
+	if _, err := io.Copy(out, gz); err != nil { //#nosec G110 -- decompressing SHA256-verified Alpine packages
+		_ = out.Close()
 		return err
 	}
 	return out.Close()
@@ -203,42 +222,46 @@ func kernelVersion(b *board.Board) string {
 // kernel image and modules, and returns paths to the extracted files. Results
 // are cached under ~/.cache/wisp/<board>/.
 func Kernel(b *board.Board) (*KernelResult, error) {
-	cacheBase, err := CacheDir()
+	root, cacheDir, err := openCacheRoot()
 	if err != nil {
 		return nil, err
 	}
-	boardDir := filepath.Join(cacheBase, b.Name, b.Kernel.Version)
+	defer root.Close()
+
+	boardDir := filepath.Join(b.Name, b.Kernel.Version)
 
 	// Check if already cached.
-	kernelPath := filepath.Join(boardDir, "vmlinuz")
-	if _, err := os.Stat(kernelPath); err == nil {
-		// Verify modules are also present.
+	kernelRel := filepath.Join(boardDir, "vmlinuz")
+	if _, err := root.Stat(kernelRel); err == nil {
 		allPresent := true
 		var modPaths []string
 		for _, m := range b.Modules {
-			mp := filepath.Join(boardDir, "modules", m.Name)
-			if _, err := os.Stat(mp); err != nil {
+			modRel := filepath.Join(boardDir, "modules", m.Name)
+			if _, err := root.Stat(modRel); err != nil {
 				allPresent = false
 				break
 			}
-			modPaths = append(modPaths, mp)
+			modPaths = append(modPaths, filepath.Join(cacheDir, modRel))
 		}
 		if allPresent {
-			return &KernelResult{KernelPath: kernelPath, ModulePaths: modPaths}, nil
+			return &KernelResult{
+				KernelPath:  filepath.Join(cacheDir, kernelRel),
+				ModulePaths: modPaths,
+			}, nil
 		}
 	}
 
-	if err := os.MkdirAll(boardDir, 0755); err != nil {
+	if err := root.MkdirAll(boardDir, 0750); err != nil {
 		return nil, fmt.Errorf("create cache dir: %w", err)
 	}
 
 	// Construct the APK URL.
-	apkURL := fmt.Sprintf("https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/%s-%s.apk",
-		b.Kernel.Package, b.Kernel.Version)
-	apkPath := filepath.Join(boardDir, filepath.Base(apkURL))
+	apkURL := fmt.Sprintf("https://dl-cdn.alpinelinux.org/alpine/v3.23/main/%s/%s-%s.apk",
+		alpineArch(b.Arch), b.Kernel.Package, b.Kernel.Version)
+	apkRel := filepath.Join(boardDir, filepath.Base(apkURL))
 
 	// Download the APK.
-	if err := Download(apkURL, apkPath, b.Kernel.SHA256); err != nil {
+	if err := download(root, apkURL, apkRel, b.Kernel.SHA256); err != nil {
 		return nil, fmt.Errorf("download kernel: %w", err)
 	}
 
@@ -250,42 +273,45 @@ func Kernel(b *board.Board) (*KernelResult, error) {
 	vmlinuzInAPK := "boot/vmlinuz-" + flavor
 
 	extractPaths := map[string]string{
-		vmlinuzInAPK: kernelPath,
+		vmlinuzInAPK: kernelRel,
 	}
 
 	// Module paths inside the APK.
-	modulesDir := filepath.Join(boardDir, "modules")
-	if err := os.MkdirAll(modulesDir, 0755); err != nil {
+	modulesRel := filepath.Join(boardDir, "modules")
+	if err := root.MkdirAll(modulesRel, 0750); err != nil {
 		return nil, fmt.Errorf("create modules dir: %w", err)
 	}
 
 	for _, m := range b.Modules {
 		apkModPath := "lib/modules/" + kver + "/" + m.Path
-		destPath := filepath.Join(modulesDir, m.Name+".gz")
-		extractPaths[apkModPath] = destPath
+		destRel := filepath.Join(modulesRel, m.Name+".gz")
+		extractPaths[apkModPath] = destRel
 	}
 
 	// Extract files from APK.
-	if err := ExtractAPK(apkPath, extractPaths); err != nil {
+	if err := extractAPK(root, apkRel, extractPaths); err != nil {
 		return nil, fmt.Errorf("extract kernel package: %w", err)
 	}
 
 	// Decompress .ko.gz modules to .ko.
 	var modPaths []string
 	for _, m := range b.Modules {
-		gzPath := filepath.Join(modulesDir, m.Name+".gz")
-		koPath := filepath.Join(modulesDir, m.Name)
-		if err := DecompressGzip(gzPath, koPath); err != nil {
+		gzRel := filepath.Join(modulesRel, m.Name+".gz")
+		koRel := filepath.Join(modulesRel, m.Name)
+		if err := decompressGzip(root, gzRel, koRel); err != nil {
 			return nil, fmt.Errorf("decompress module %s: %w", m.Name, err)
 		}
-		os.Remove(gzPath)
-		modPaths = append(modPaths, koPath)
+		_ = root.Remove(gzRel)
+		modPaths = append(modPaths, filepath.Join(cacheDir, koRel))
 	}
 
 	// Clean up the APK.
-	os.Remove(apkPath)
+	_ = root.Remove(apkRel)
 
-	return &KernelResult{KernelPath: kernelPath, ModulePaths: modPaths}, nil
+	return &KernelResult{
+		KernelPath:  filepath.Join(cacheDir, kernelRel),
+		ModulePaths: modPaths,
+	}, nil
 }
 
 // Firmware downloads firmware files for the given board to the cache
@@ -295,30 +321,48 @@ func Firmware(b *board.Board) (map[string]string, error) {
 		return nil, nil
 	}
 
-	cacheBase, err := CacheDir()
+	root, cacheDir, err := openCacheRoot()
 	if err != nil {
 		return nil, err
 	}
-	fwDir := filepath.Join(cacheBase, b.Name, "firmware")
-	if err := os.MkdirAll(fwDir, 0755); err != nil {
+	defer root.Close()
+
+	fwDir := filepath.Join(b.Name, "firmware")
+	if err := root.MkdirAll(fwDir, 0750); err != nil {
 		return nil, fmt.Errorf("create firmware dir: %w", err)
 	}
 
 	result := make(map[string]string)
 	for _, fw := range b.Firmware {
-		localPath := filepath.Join(fwDir, fw.Dest)
-		if err := Download(fw.URL, localPath, fw.SHA256); err != nil {
+		relPath := filepath.Join(fwDir, fw.Dest)
+		if err := download(root, fw.URL, relPath, fw.SHA256); err != nil {
 			return nil, fmt.Errorf("download firmware %s: %w", fw.Dest, err)
 		}
-		result[fw.Dest] = localPath
+		result[fw.Dest] = filepath.Join(cacheDir, relPath)
 	}
 
 	return result, nil
 }
 
-// checksum verifies that the file at path has the expected SHA256 hex digest.
-func checksum(path, want string) (bool, error) {
-	f, err := os.Open(path)
+// alpineArch maps board architecture strings to Alpine APK repository
+// architecture names.
+func alpineArch(arch string) string {
+	switch arch {
+	case "aarch64":
+		return "aarch64"
+	case "armv7":
+		return "armhf"
+	case "x86_64":
+		return "x86_64"
+	default:
+		return arch
+	}
+}
+
+// checksumFile verifies that the file at relPath within root has the expected
+// SHA256 hex digest.
+func checksumFile(root *os.Root, relPath, want string) (bool, error) {
+	f, err := root.Open(relPath)
 	if err != nil {
 		return false, err
 	}

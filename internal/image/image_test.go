@@ -1,8 +1,6 @@
 package image
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 )
 
@@ -42,8 +40,7 @@ func TestBuild(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			outPath := filepath.Join(t.TempDir(), "test.img")
-			err := Build(outPath, tt.files)
+			imgData, err := Build(tt.files)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -52,11 +49,6 @@ func TestBuild(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatalf("Build: %v", err)
-			}
-
-			imgData, err := os.ReadFile(outPath)
-			if err != nil {
-				t.Fatalf("read image: %v", err)
 			}
 
 			if len(imgData) != defaultImageSize {
@@ -96,14 +88,9 @@ func TestBuildFileContent(t *testing.T) {
 		{Name: "config.txt", Data: content},
 	}
 
-	outPath := filepath.Join(t.TempDir(), "test.img")
-	if err := Build(outPath, files); err != nil {
-		t.Fatalf("Build: %v", err)
-	}
-
-	imgData, err := os.ReadFile(outPath)
+	imgData, err := Build(files)
 	if err != nil {
-		t.Fatalf("read image: %v", err)
+		t.Fatalf("Build: %v", err)
 	}
 
 	got, err := ReadFile(imgData, "config.txt")
@@ -145,14 +132,9 @@ func TestBPBSignature(t *testing.T) {
 		{Name: "test.txt", Data: []byte("test")},
 	}
 
-	outPath := filepath.Join(t.TempDir(), "test.img")
-	if err := Build(outPath, files); err != nil {
-		t.Fatalf("Build: %v", err)
-	}
-
-	imgData, err := os.ReadFile(outPath)
+	imgData, err := Build(files)
 	if err != nil {
-		t.Fatalf("read image: %v", err)
+		t.Fatalf("Build: %v", err)
 	}
 
 	// Check partition BPB signature.

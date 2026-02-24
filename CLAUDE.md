@@ -43,24 +43,29 @@ wisp is written in Go. The only external dependency is `golang.org/x/sys/unix`
 ```text
 wisp/
 ├── cmd/
-│   ├── wisp/              # CLI entrypoint (host tool)
-│   │   ├── main.go
-│   │   ├── boards/        # Board profile JSONs (embedded via go:embed)
-│   │   │   ├── pi5.json
-│   │   │   └── qemu.json
-│   │   └── embed/         # Pre-built init binary (embedded via go:embed)
-│   │       └── init-arm64 # Cross-compiled by Makefile, not committed
-│   ├── init/              # Init binary (cross-compiled, runs on target)
-│   └── mkinitrd/          # Standalone initrd assembler (Makefile workflow)
+│   ├── wisp/              # CLI entrypoint (thin wiring layer)
+│   │   └── main.go
+│   └── init/              # Init binary (cross-compiled, runs on target)
 ├── internal/
-│   ├── board/             # Board profile types and loader
-│   ├── initrd/            # Initrd assembly (cpio archive creation)
+│   ├── board/             # Board profile types, loader, and embedded profiles
+│   │   └── boards/        # Board profile JSONs (embedded via go:embed)
+│   │       ├── pi5.json
+│   │       ├── qemu.json
+│   │       └── raspi3b.json
+│   ├── initrd/            # Initrd assembly, init binary embedding, build logic
+│   │   ├── initrd.go      # Low-level cpio archive writer
+│   │   ├── initbin.go     # Embedded init binaries + arch lookup
+│   │   ├── build.go       # High-level Build() assembling complete initrd
+│   │   └── embed/         # Pre-built init binaries (cross-compiled by Makefile)
+│   │       ├── init-arm64
+│   │       ├── init-riscv64
+│   │       └── init-amd64
 │   ├── image/             # Disk image assembly (FAT32 boot partition)
 │   ├── fetch/             # Asset fetching and caching (kernels, firmware)
 │   └── validate/          # Binary validation (static ELF, correct arch)
 ├── testdata/
 │   └── helloworld/        # Test HTTP server for QEMU integration tests
-├── Makefile               # Two-step build: init binary → wisp CLI
+├── Makefile               # Two-step build: init binaries → wisp CLI
 ├── DESIGN.md              # Architecture and design decisions
 ├── README.md
 ├── CLAUDE.md              # This file
@@ -93,8 +98,8 @@ wisp validate --target pi5 --binary ./myservice
 # Build everything (cross-compile init, build wisp CLI, build test binary)
 make
 
-# Quick QEMU test using the Makefile workflow (bypasses wisp CLI)
-make qemu
+# Quick QEMU test
+wisp run --target qemu --binary ./build/helloworld --ip 10.0.2.15/24 --gateway 10.0.2.2
 
 # Run all tests
 go test ./...
@@ -105,8 +110,8 @@ make clean
 
 The Makefile performs a two-step build:
 
-1. Cross-compile `cmd/init` → `cmd/wisp/embed/init-arm64`
-2. Build `cmd/wisp` (which embeds the init binary and board profiles via
+1. Cross-compile `cmd/init` → `internal/initrd/embed/init-{arm64,riscv64,amd64}`
+2. Build `cmd/wisp` (which embeds the init binaries and board profiles via
    `go:embed`)
 
 ## Key constraints
@@ -125,7 +130,7 @@ The Makefile performs a two-step build:
 
 ## Board profiles
 
-Board profiles are JSON files in `cmd/wisp/boards/` that define everything
+Board profiles are JSON files in `internal/board/boards/` that define everything
 board-specific: firmware URLs, DTB filename, kernel package source, required
 modules, network interface name, architecture. Embedded into the wisp binary
 via `go:embed` and parsed with `board.Parse()`.

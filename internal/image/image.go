@@ -6,7 +6,6 @@ package image
 import (
 	"encoding/binary"
 	"fmt"
-	"os"
 	"path"
 	"sort"
 	"strings"
@@ -33,10 +32,10 @@ const (
 	defaultImageSize = 64 * 1024 * 1024
 )
 
-// Build creates a bootable FAT32 disk image at outputPath containing the
-// given files. Files with paths containing "/" are placed in subdirectories
-// (one level only, e.g. "overlays/foo.dtbo").
-func Build(outputPath string, files []File) error {
+// Build creates a bootable FAT32 disk image containing the given files and
+// returns the raw image bytes. Files with paths containing "/" are placed in
+// subdirectories (one level only, e.g. "overlays/foo.dtbo").
+func Build(files []File) ([]byte, error) {
 	imageSize := defaultImageSize
 	totalSectors := imageSize / sectorSize
 
@@ -137,7 +136,7 @@ func Build(outputPath string, files []File) error {
 		off := clusterOffset(startCluster)
 		copy(img[off:], data)
 
-		nextCluster += uint32(numClusters)
+		nextCluster += uint32(numClusters) //#nosec G115 -- image is 64MB; numClusters fits in uint32
 		return startCluster
 	}
 
@@ -147,7 +146,7 @@ func Build(outputPath string, files []File) error {
 	// Write regular files in root directory.
 	for _, f := range rootFiles {
 		cluster := allocClusters(f.data)
-		entry := makeDirEntry(f.shortName, false, cluster, uint32(len(f.data)))
+		entry := makeDirEntry(f.shortName, false, cluster, uint32(len(f.data))) //#nosec G115 -- image is 64MB; file sizes fit in uint32
 		rootDirEntries = append(rootDirEntries, entry...)
 	}
 
@@ -181,7 +180,7 @@ func Build(outputPath string, files []File) error {
 		// Write files in this subdirectory.
 		for _, f := range dirFiles {
 			cluster := allocClusters(f.data)
-			entry := makeDirEntry(f.shortName, false, cluster, uint32(len(f.data)))
+			entry := makeDirEntry(f.shortName, false, cluster, uint32(len(f.data))) //#nosec G115 -- image is 64MB; file sizes fit in uint32
 			subDirData = append(subDirData, entry...)
 		}
 
@@ -207,7 +206,7 @@ func Build(outputPath string, files []File) error {
 	binary.LittleEndian.PutUint32(img[fsInfoOff+488:], freeCount)
 	binary.LittleEndian.PutUint32(img[fsInfoOff+492:], nextCluster)
 
-	return os.WriteFile(outputPath, img, 0644)
+	return img, nil
 }
 
 // writeMBR writes a Master Boot Record with a single FAT32 partition entry.
@@ -304,7 +303,7 @@ func makeDirEntry(name [11]byte, isDir bool, cluster uint32, size uint32) []byte
 // uppercased, padded with spaces, and the extension is placed in positions 8-10.
 func toShortName(name string) [11]byte {
 	var sn [11]byte
-	for i := range sn {
+	for i := range sn { //#nosec G602 -- range produces valid indices
 		sn[i] = ' '
 	}
 
