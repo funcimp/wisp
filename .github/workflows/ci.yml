@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - run: make
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: init-binaries
+          path: internal/initrd/embed/init-*
+
+  vet:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: init-binaries
+          path: internal/initrd/embed/
+
+      - run: go vet ./...
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: init-binaries
+          path: internal/initrd/embed/
+
+      - run: go test ./...
+
+  gosec:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: init-binaries
+          path: internal/initrd/embed/
+
+      - name: Run Gosec Security Scanner
+        uses: securego/gosec@v2
+        with:
+          args: -exclude-dir=testdata ./...

@@ -27,8 +27,13 @@ go.work.sum
 # Build artifacts (wisp Makefile output)
 build/
 
-# Embedded init binary (cross-compiled by Makefile, not committed)
-cmd/wisp/embed/init-arm64
+# Embedded init binaries (cross-compiled by Makefile, not committed)
+internal/initrd/embed/init-arm64
+internal/initrd/embed/init-riscv64
+internal/initrd/embed/init-amd64
+
+# Default wisp output directory
+wisp-output/
 
 # env file
 .env
@@ -36,3 +41,7 @@ cmd/wisp/embed/init-arm64
 # Editor/IDE
 # .idea/
 # .vscode/
+
+
+# gosec output
+results.json

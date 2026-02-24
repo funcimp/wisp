@@ -147,12 +147,6 @@ make
 This cross-compiles the init binary for the target architecture, then builds
 the wisp CLI which embeds it.
 
-Quick QEMU test without the wisp CLI (Makefile workflow):
-
-```sh
-make qemu
-```
-
 Run tests:
 
 ```sh

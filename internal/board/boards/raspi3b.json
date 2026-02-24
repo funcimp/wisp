@@ -1,0 +1,36 @@
+{
+  "name": "raspi3b",
+  "arch": "aarch64",
+  "page_size": 4096,
+  "network_interface": "eth0",
+  "kernel": {
+    "source": "alpine",
+    "package": "linux-rpi",
+    "version": "6.6.31-r0",
+    "sha256": ""
+  },
+  "cmdline": "rdinit=/init console=ttyAMA0 net.ifnames=0 quiet",
+  "modules": [
+    {
+      "path": "kernel/drivers/usb/dwc2/dwc2.ko.gz",
+      "name": "dwc2.ko"
+    },
+    {
+      "path": "kernel/drivers/net/usb/usbnet.ko.gz",
+      "name": "usbnet.ko"
+    },
+    {
+      "path": "kernel/drivers/net/usb/smsc95xx.ko.gz",
+      "name": "smsc95xx.ko"
+    }
+  ],
+  "qemu": {
+    "binary": "qemu-system-aarch64",
+    "machine": "raspi3b",
+    "cpu": "cortex-a53",
+    "memory": "1G",
+    "accel": "tcg",
+    "net_dev": "usb-net",
+    "extra": ["-usb", "-device", "usb-hub,bus=usb-bus.0"]
+  }
+}

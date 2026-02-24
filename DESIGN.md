@@ -192,7 +192,7 @@ adds scope to v1 unnecessarily.
 
 ## Target board profiles
 
-Each supported board has a JSON profile in `cmd/wisp/boards/` that defines everything
+Each supported board has a JSON profile in `internal/board/boards/` that defines everything
 board-specific. Profiles are embedded into the wisp binary via `go:embed` and parsed with
 `board.Parse()`. Adding a new board means adding a new JSON file — no code changes
 required (ideally).
@@ -209,8 +209,9 @@ Fields in a board profile:
 - **`boot_config`** — Content of `config.txt` written to the boot partition.
 - **`cmdline`** — Kernel command line written to `cmdline.txt`.
 - **`modules`** — List of kernel modules with `path` (in APK) and `name` (output filename).
+- **`qemu`** — QEMU emulation config: `binary`, `machine`, `cpu`, `memory`, `accel`, `net_dev`, `extra`. Present only for QEMU-bootable targets.
 
-Example (`cmd/wisp/boards/qemu.json`):
+Example (`internal/board/boards/qemu.json`):
 
 ```json
 {
@@ -229,7 +230,15 @@ Example (`cmd/wisp/boards/qemu.json`):
     { "path": "kernel/net/core/failover.ko.gz", "name": "failover.ko" },
     { "path": "kernel/drivers/net/net_failover.ko.gz", "name": "net_failover.ko" },
     { "path": "kernel/drivers/net/virtio_net.ko.gz", "name": "virtio_net.ko" }
-  ]
+  ],
+  "qemu": {
+    "binary": "qemu-system-aarch64",
+    "machine": "virt",
+    "cpu": "host",
+    "memory": "512M",
+    "accel": "hvf",
+    "net_dev": "virtio-net-pci"
+  }
 }
 ```
 
