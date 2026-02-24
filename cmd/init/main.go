@@ -66,7 +66,7 @@ func mustf(err error, msg string) {
 // readConf reads a key=value config file. Blank lines and lines starting
 // with # are ignored. No quoting or escaping.
 func readConf(path string) (map[string]string, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //#nosec G304 -- hardcoded path from main(), no user input
 	if err != nil {
 		return nil, err
 	}
@@ -95,11 +95,18 @@ func readConf(path string) (map[string]string, error) {
 // must be listed before dependents. If the file doesn't exist, this is a no-op
 // (not all boards need modules).
 func loadModules(listPath string) {
-	f, err := os.Open(listPath)
+	f, err := os.Open(listPath) //#nosec G304 -- hardcoded path from main(), no user input
 	if err != nil {
 		return // no modules file — nothing to load
 	}
 	defer f.Close()
+
+	modRoot, err := os.OpenRoot("/lib/modules")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "init: open /lib/modules: %v\n", err) //#nosec G705 -- PID 1 stderr, not web output
+		return
+	}
+	defer modRoot.Close()
 
 	s := bufio.NewScanner(f)
 	for s.Scan() {
@@ -107,24 +114,24 @@ func loadModules(listPath string) {
 		if name == "" || name[0] == '#' {
 			continue
 		}
-		path := "/lib/modules/" + name
-		if err := loadModule(path); err != nil {
-			fmt.Fprintf(os.Stderr, "init: load module %s: %v\n", name, err)
+		if err := loadModule(modRoot, name); err != nil {
+			fmt.Fprintf(os.Stderr, "init: load module %s: %v\n", name, err) //#nosec G705 -- PID 1 stderr, not web output
 		}
 	}
 }
 
 // loadModule loads a single kernel module using the finit_module(2) syscall.
 // This takes a file descriptor rather than a memory buffer, avoiding the need
-// to read the entire module into memory first.
-func loadModule(path string) error {
-	f, err := os.Open(path)
+// to read the entire module into memory first. The root scopes access to
+// /lib/modules/ preventing path traversal.
+func loadModule(root *os.Root, name string) error {
+	f, err := root.Open(name)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 
-	return unix.FinitModule(int(f.Fd()), "", 0)
+	return unix.FinitModule(int(f.Fd()), "", 0) //#nosec G115 -- fd is a small non-negative int, fits in int
 }
 
 // --- Netlink helpers ---
@@ -161,7 +168,7 @@ func waitForIface(name string, timeout time.Duration) error {
 
 // ifIndex reads the kernel interface index from sysfs.
 func ifIndex(name string) (int32, error) {
-	data, err := os.ReadFile("/sys/class/net/" + name + "/ifindex")
+	data, err := os.ReadFile("/sys/class/net/" + name + "/ifindex") //#nosec G304 -- sysfs path, name from embedded board config
 	if err != nil {
 		return 0, err
 	}
@@ -202,9 +209,9 @@ func addrAdd(name, cidr string) error {
 
 	payload := nlSerialize(&unix.IfAddrmsg{
 		Family:    unix.AF_INET,
-		Prefixlen: uint8(prefixLen),
+		Prefixlen: uint8(prefixLen),  //#nosec G115 -- prefix length is 0-32
 		Scope:     unix.RT_SCOPE_UNIVERSE,
-		Index:     uint32(idx),
+		Index:     uint32(idx), //#nosec G115 -- interface index from kernel, always positive
 	})
 	payload = append(payload, nlattr(unix.IFA_LOCAL, ip)...)
 	payload = append(payload, nlattr(unix.IFA_ADDRESS, ip)...)
@@ -237,7 +244,7 @@ func routeAddGw(name, gw string) error {
 	payload = append(payload, nlattr(unix.RTA_GATEWAY, []byte(gwIP))...)
 
 	oif := make([]byte, 4)
-	binary.NativeEndian.PutUint32(oif, uint32(idx))
+	binary.NativeEndian.PutUint32(oif, uint32(idx)) //#nosec G115 -- interface index from kernel, always positive
 	payload = append(payload, nlattr(unix.RTA_OIF, oif)...)
 
 	msg := nlmsg(unix.RTM_NEWROUTE,
@@ -251,7 +258,7 @@ func routeAddGw(name, gw string) error {
 // nlSerialize encodes a struct to bytes using the native byte order.
 func nlSerialize(v any) []byte {
 	var buf bytes.Buffer
-	binary.Write(&buf, binary.NativeEndian, v)
+	_ = binary.Write(&buf, binary.NativeEndian, v)
 	return buf.Bytes()
 }
 
@@ -259,7 +266,7 @@ func nlSerialize(v any) []byte {
 func nlmsg(typ uint16, flags uint16, payload []byte) []byte {
 	total := nlmAlign(unix.SizeofNlMsghdr + len(payload))
 	hdr := unix.NlMsghdr{
-		Len:   uint32(total),
+		Len:   uint32(total), //#nosec G115 -- netlink message, well under uint32 max
 		Type:  typ,
 		Flags: flags,
 		Seq:   1,
@@ -279,7 +286,7 @@ func nlattr(typ uint16, data []byte) []byte {
 	buf := make([]byte, total)
 
 	copy(buf, nlSerialize(&unix.RtAttr{
-		Len:  uint16(attrLen),
+		Len:  uint16(attrLen), //#nosec G115 -- netlink attribute, well under uint16 max
 		Type: typ,
 	}))
 	copy(buf[unix.SizeofRtAttr:], data)
@@ -313,15 +320,15 @@ func nlsend(msg []byte) error {
 		return fmt.Errorf("netlink response too short: %d bytes", n)
 	}
 	var hdr unix.NlMsghdr
-	binary.Read(bytes.NewReader(buf[:unix.SizeofNlMsghdr]), binary.NativeEndian, &hdr)
+	_ = binary.Read(bytes.NewReader(buf[:unix.SizeofNlMsghdr]), binary.NativeEndian, &hdr)
 
 	if hdr.Type == unix.NLMSG_ERROR {
 		// The error payload is a 4-byte errno (negative on failure, 0 on success).
 		errOff := unix.SizeofNlMsghdr
 		if n >= errOff+4 {
-			errno := int32(binary.NativeEndian.Uint32(buf[errOff : errOff+4]))
+			errno := int32(binary.NativeEndian.Uint32(buf[errOff : errOff+4])) //#nosec G115 -- kernel errno, valid range
 			if errno != 0 {
-				return unix.Errno(-errno)
+				return unix.Errno(-errno) //#nosec G115 -- negated errno to positive syscall.Errno
 			}
 		}
 	}
