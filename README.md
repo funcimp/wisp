@@ -159,4 +159,4 @@ Early development. Expect breaking changes.
 
 ## License
 
-MIT
+Unlicense (Public Domain)
